@@ -385,6 +385,25 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter_batch] += grads
         self.denom[update_filter_batch] += 1
 
+    @torch.no_grad()
+    def add_densification_stats_3d(self, visibility_filter):
+        grad = self._xyz.grad
+
+        if grad is None:
+            return
+
+        grad = grad.detach()
+
+        # 采用三维位置梯度的 L2 norm
+        grad_norm = torch.linalg.vector_norm(
+            grad[visibility_filter],
+            dim=-1,
+            keepdim=True,
+        )
+
+        self.xyz_gradient_accum[visibility_filter] += grad_norm
+        self.denom[visibility_filter] += 1
+
     # ======================= save / load ======================================
 
     def construct_attributes(self):
