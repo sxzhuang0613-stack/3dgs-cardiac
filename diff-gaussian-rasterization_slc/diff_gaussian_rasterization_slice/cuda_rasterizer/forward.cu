@@ -268,11 +268,48 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	radii[idx] = 0;
 	tiles_touched[idx] = 0;
 
-	if (cov3D_precomp == nullptr)
+	// if (cov3D_precomp == nullptr)
+	// {
+	// 	computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+	// }
+	// const float* cov3D = (cov3D_precomp != nullptr) ? cov3D_precomp + idx * 6 : cov3Ds + idx * 6;
+	constexpr float kCovarianceJitter = 1e-8f;
+
+	// 将两种输入形式统一写入内部协方差缓冲区
+	float* cov3D = cov3Ds + idx * 6;
+
+	if (cov3D_precomp != nullptr)
 	{
-		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		#pragma unroll
+		for (int k = 0; k < 6; ++k)
+			cov3D[k] = cov3D_precomp[idx * 6 + k];
 	}
-	const float* cov3D = (cov3D_precomp != nullptr) ? cov3D_precomp + idx * 6 : cov3Ds + idx * 6;
+	else
+	{
+		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3D);
+	}
+
+	// 对协方差本身加对角正则化，
+	// 而不是在求逆时修改行列式。
+	cov3D[0] += kCovarianceJitter;  // xx
+	cov3D[3] += kCovarianceJitter;  // yy
+	cov3D[5] += kCovarianceJitter;  // zz
+
+	const float a = cov3D[0];
+	const float b = cov3D[1];
+	const float c = cov3D[2];
+	const float d = cov3D[3];
+	const float e = cov3D[4];
+	const float f = cov3D[5];
+
+	const float minor2 = a * d - b * b;
+	const float det3 = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
+
+	// Sylvester 判据：协方差必须正定
+	if (!(a > 0.0f) || !(minor2 > 0.0f) || !(det3 > 0.0f) || !isfinite(det3))
+	{
+		return;
+	}
 
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	
@@ -331,27 +368,27 @@ __global__ void preprocessCUDA(int P, int D, int M,
         sigma_gauss = cov3D[5]; // sigma_zz
     }
     
-    // 3. 计算衰减因子 p(z)
-    float p_z = expf(-0.5f * dist * dist / (sigma_gauss + 1e-6f));
+    // // 3. 计算衰减因子 p(z)
+    // float p_z = expf(-0.5f * dist * dist / (sigma_gauss + 1e-6f));
 
-    // 4. 计算加权后的半径
-	// float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)) * p_z);
+    // // 4. 计算加权后的半径
+	// // float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)) * p_z);
     
-    // --- START: 添加安全检查 ---
-    float base_radius = 3.f * sqrt(max(lambda1, lambda2));
-    float weighted_radius = base_radius * sqrt(p_z);
+    // // --- START: 添加安全检查 ---
+    // float base_radius = 3.f * sqrt(max(lambda1, lambda2));
+    // float weighted_radius = base_radius * sqrt(p_z);
     
-    // 如果加权后的半径太小，直接跳过这个高斯点
-    if (weighted_radius < 1.0f) {
-        return;
-    }
+    // // 如果加权后的半径太小，直接跳过这个高斯点
+    // if (weighted_radius < 1.0f) {
+    //     return;
+    // }
     
-    float my_radius = ceil(weighted_radius);
-    // --- END: 添加安全检查 ---
+    // float my_radius = ceil(weighted_radius);
+    // // --- END: 添加安全检查 ---
     
-    // 5. 在此处计算深度
-    depths[idx] = -dist;
-    // --- END: 新增代码 ---
+    // // 5. 在此处计算深度
+    // depths[idx] = -dist;
+    // // --- END: 新增代码 ---
 
 
     // 将世界坐标系下的条件均值转换到像素空间
@@ -359,6 +396,49 @@ __global__ void preprocessCUDA(int P, int D, int M,
                            ((mu_v + 1.0f) * H - 1.0f) * 0.5f };
 
 	uint2 rect_min, rect_max;
+	// 1. 确保法向方差有效
+	if (!(sigma_gauss > 1e-12f) || !isfinite(sigma_gauss)) { return; }
+
+	// 2. Gaussian 中心在目标切片上的法向衰减
+	const float p_z = expf( -0.5f * dist * dist / sigma_gauss );
+
+	// 3. Gaussian 在该切片上的最大未截断 alpha
+	const float peak_alpha = opacities[idx] * p_z;
+
+	// 与 renderCUDA 的 alpha threshold 保持一致
+	constexpr float alpha_threshold = 1.0f / 255.0f;
+
+	// 该 Gaussian 在整张切片上都没有有效贡献
+	if (!(peak_alpha > alpha_threshold)) {
+		return;
+	}
+
+	// 4. 求 alpha 有效支撑区域的 Mahalanobis 阈值
+	const float cutoff_squared = 2.0f * logf( peak_alpha / alpha_threshold );
+
+	// 5. 沿最大 covariance 特征值方向计算保守半径
+	const float max_eigenvalue =
+		fmaxf(lambda1, lambda2);
+
+	if (!(max_eigenvalue > 0.0f) ||
+		!isfinite(max_eigenvalue)) {
+		return;
+	}
+
+	// 增加 1 pixel 安全余量，减少取整导致的遗漏
+	const int my_radius = max(
+		1,
+		static_cast<int>(
+			ceilf(
+				sqrtf(
+					max_eigenvalue * cutoff_squared
+				)
+			) + 1.0f
+		)
+	);
+
+	// 6. 保留原来的切片距离排序策略
+	depths[idx] = -dist;
 	getRect(point_image, my_radius, rect_min, rect_max, grid);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0) 
 		return;
