@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 # ==================== [功能模块 1: 动态自适应子损失函数趋势图] ====================
@@ -29,7 +29,7 @@ def update_loss_plot(out_dir, iters_list, loss_dict):
     if "Total Loss" in loss_dict:
         plt.plot(iters_list, loss_dict["Total Loss"], label='Total Loss', color=colors[0], linewidth=2.0)
         
-    color_idx = 1
+    color_idx = 1  
     for loss_name, loss_values in loss_dict.items():
         if loss_name == "Total Loss":
             continue
@@ -260,11 +260,13 @@ def training(args):
                         radii_batch[visibility_filter_batch]
                     )
                     xyscreen = data_dict['viewspace_points']
-                    Gaussians.add_densification_stats(xyscreen, visibility_filter_batch)        
+                    # Gaussians.add_densification_stats(xyscreen, visibility_filter_batch)        
+                    Gaussians.add_densification_stats_3d(visibility_filter_batch)   
                     
                     size_threshold = args.max_screen_size if iter > args.opacity_reset_interval else None
                     
-                    if iter >= args.densify_from_iter and iter % args.densification_interval:
+                    # if iter >= args.densify_from_iter and iter % args.densification_interval:
+                    if (iter >= args.densify_from_iter and iter % args.densification_interval == 0):
                         Gaussians.densify_and_prune(
                             max_grad=args.densify_grad_threshold, 
                             min_opacity=args.min_opacity, 
@@ -279,9 +281,11 @@ def training(args):
                         Gaussians.reset_opacity()
             # =================================================================
 
-            Gaussians.get_scaling.data.clamp_(-10, 10)
+            # Gaussians.get_scaling.data.clamp_(-10, 10)
             Gaussians.optimizer.step()
             Gaussians.optimizer.zero_grad(set_to_none=True)
+            with torch.no_grad():
+                Gaussians._scaling.clamp_(-10.0, 10.0)
 
             # --- [周期重建] 检查并触发每隔 2000 步的全 Case 重建切片 ---
             rec_interval = getattr(args, "reconstruct_interval", 2000)
