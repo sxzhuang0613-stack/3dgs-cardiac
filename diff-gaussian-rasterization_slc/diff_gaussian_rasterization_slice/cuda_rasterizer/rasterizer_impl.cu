@@ -323,7 +323,14 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(, debug)
 
 	// Let each tile blend its range of Gaussians independently in parallel
-	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+	const float* feature_ptr =
+    	colors_precomp != nullptr
+        ? colors_precomp
+        : geomState.rgb;
+
+	// const float* cov3D_ptr = cov3D_precomp != nullptr ? cov3D_precomp : geomState.cov3D;
+	const float* cov3D_ptr = geomState.cov3D;
+
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
@@ -333,14 +340,15 @@ int CudaRasterizer::Rasterizer::forward(
 		feature_ptr,
 		geomState.conic_opacity,
 		means3D,
-		geomState.cov3D,
+		cov3D_ptr,
 		(glm::vec3*)cam_pos,
 		axis,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
-		out_color), debug)
-
+		out_color
+	), debug)
+	// 关键：必须返回实际渲染的实例数量
 	return num_rendered;
 }
 
@@ -407,6 +415,8 @@ void CudaRasterizer::Rasterizer::backward(
 	CHECK_CUDA(cudaMemset(dL_dcov3D_temp, 0, P * 6 * sizeof(float)), debug);
 	
 	// New BACKWARD::render call with G3D method
+	// const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
+	const float* cov3D_ptr = geomState.cov3D;
 	CHECK_CUDA(BACKWARD::render(
 		tile_grid,
 		block,
@@ -420,7 +430,8 @@ void CudaRasterizer::Rasterizer::backward(
 		imgState.n_contrib,
 		dL_dpix,
 		(float3*)means3D,
-		geomState.cov3D,
+		// geomState.cov3D,
+		cov3D_ptr,
 		(glm::vec3*)campos,
 		axis,
 		dL_dmeans_temp,
@@ -431,7 +442,7 @@ void CudaRasterizer::Rasterizer::backward(
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
 	// use the one we computed ourselves.
-	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
+	// const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
 	
 	// Corrected BACKWARD::preprocess call with proper parameters
 	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
