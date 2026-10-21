@@ -400,8 +400,14 @@ renderCUDA(
 
 			// =================== G3D 梯度计算 ===================
 			// 计算 dL/d(power)
-			float dL_dG3D = dL_dalpha * opacity;
-			float dL_dpower = dL_dG3D * G3D;
+			// float dL_dG3D = dL_dalpha * opacity;
+			// float dL_dpower = dL_dG3D * G3D;
+			const float raw_alpha = opacity * G3D;
+			// alpha = min(0.99, raw_alpha)
+			// 超过截断阈值时，局部导数为零
+			const float clamp_grad = (raw_alpha < 0.99f) ? 1.0f : 0.0f;
+			const float dL_dG3D = dL_dalpha * opacity * clamp_grad;
+			const float dL_dpower = dL_dG3D * G3D;
 
 			// 计算并累加对均值的梯度
 			// dL/dμ = dL/dpower * ∂power/∂μ = dL/dpower * Σ^(-1) * (x - μ)
@@ -421,7 +427,8 @@ renderCUDA(
 			atomicAdd(&dL_dcov3D[global_id * 6 + 5], dL_dSigma_factor * v.z * v.z); // zz
 
 			// Update gradients w.r.t. opacity of the Gaussian
-			atomicAdd(&(dL_dopacity[global_id]), G3D * dL_dalpha);
+			// atomicAdd(&(dL_dopacity[global_id]), G3D * dL_dalpha);
+			atomicAdd(&(dL_dopacity[global_id]), G3D * dL_dalpha * clamp_grad);
 		}
 	}
 }
